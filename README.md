@@ -1,25 +1,15 @@
-# xmlToPdf
+# eFactura XML → PDF (ANAF)
 
-API și utilitar pentru convertirea eFactura XML -> PDF folosind ANAF FCTEL transformare endpoint.
+Serviciu și CLI pentru conversia fișierelor eFactura **XML → PDF** folosind endpoint-ul ANAF:
+`/prod/FCTEL/rest/transformare/{val1}/{val2}` (Content-Type: `text/plain`).
 
-Structură:
-- src/xmltopdf: cod sursă (converter + API)
-- tests: pytest
+## Endpoint-uri
+- `POST /convert/single` – 1 fișier XML → PDF (download)
+- `POST /convert/batch?merge=true` – mai multe XML → `all_in_one.pdf`
+- `GET /health` – status
 
-Instalare (virtualenv / pip):
-python -m venv .venv
-.\.venv\Scripts\activate
+## Rulare local (fără Docker)
+```bash
 pip install -r requirements.txt
-
-sau cu Poetry:
-pip install poetry
-poetry install
-
-Rulare API (dezvoltare):
-uvicorn src.xmltopdf.api:app --reload --port 8080
-
-CLI:
-python xmlToPdf.py <fișier|director> -o out_dir --setAllAsPDF
-
-Testare:
-pytest -q
+uvicorn src.xmltopdf.api:app --host 0.0.0.0 --port 8000 --reload
+# Swagger: http://localhost:8000/docs

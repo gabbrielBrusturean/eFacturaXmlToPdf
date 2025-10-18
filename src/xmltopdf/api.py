@@ -1,56 +1,55 @@
+from __future__ import annotations
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
-import tempfile
-import shutil
-from typing import List
+from fastapi.responses import StreamingResponse, JSONResponse
 from pathlib import Path
-from . import converter
+from tempfile import TemporaryDirectory
+from typing import List
+from .converter import build_url, convert_one_xml_bytes, convert_paths, merge_pdfs, make_session
 from .settings import settings
 
-app = FastAPI(title=settings.app_name)
+app = FastAPI(title="xmlToPdf Service", version="0.1.0")
 
-@app.post("/convert/", response_class=FileResponse)
-async def convert(files: List[UploadFile] = File(...),
-                  oauth: bool = False,
-                  token: str | None = None,
-                  val1: str = "FACT1",
-                  novld: bool = False,
-                  set_all_as_pdf: bool = False):
-    if not files:
-        raise HTTPException(status_code=400, detail="No files uploaded")
-    temp_dir = Path(tempfile.mkdtemp())
-    try:
-        xml_paths = []
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.post("/convert/single", response_class=StreamingResponse)
+async def convert_single(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".xml"):
+        raise HTTPException(400, "Upload must be an .xml file")
+    xml_bytes = await file.read()
+    url = build_url(settings.use_oauth, settings.val1, settings.novld)
+    session = make_session(timeout=settings.timeout)
+    ok, payload = convert_one_xml_bytes(session, url, xml_bytes, settings.bearer_token)
+    if not ok:
+        raise HTTPException(502, f"ANAF transform failed: {payload}")
+    return StreamingResponse(iter([payload]), media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="{Path(file.filename).stem}.pdf"'
+    })
+
+@app.post("/convert/batch")
+async def convert_batch(files: List[UploadFile] = File(...), merge: bool = False):
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        xml_paths: List[Path] = []
         for f in files:
-            dest = temp_dir / f.filename
-            with open(dest, "wb") as out:
-                content = await f.read()
-                out.write(content)
-            xml_paths.append(dest)
-        out_pdf_dir = temp_dir / "out"
-        out_pdf_dir.mkdir(exist_ok=True)
-        result = converter.convert_files(
-            xml_paths,
-            out_pdf_dir,
-            use_oauth=oauth,
-            val1=val1,
-            novld=novld,
-            token=token,
-            timeout=settings.timeout,
-            set_all_as_pdf=set_all_as_pdf,
-            merged_name="result.pdf"
-        )
-        if set_all_as_pdf and result.get("merged_ok"):
-            return FileResponse(result["merged_path"], filename="result.pdf", media_type="application/pdf")
-        created = result.get("created", [])
-        if len(created) == 1:
-            return FileResponse(created[0], filename=created[0].name, media_type="application/pdf")
-        if created:
-            merged = out_pdf_dir / "result.pdf"
-            merged_ok, merged_msg = converter.merge_pdfs(created, merged)
-            if merged_ok:
-                return FileResponse(merged, filename="result.pdf", media_type="application/pdf")
-            raise HTTPException(status_code=500, detail=f"Merge failed: {merged_msg}")
-        raise HTTPException(status_code=500, detail="No PDFs were produced by conversion.")
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+            if not f.filename.lower().endswith(".xml"):
+                continue
+            p = tmp / f.filename
+            p.write_bytes(await f.read())
+            xml_paths.append(p)
+        if not xml_paths:
+            raise HTTPException(400, "no .xml files provided")
+
+        out_dir = tmp / "out"
+        url = build_url(settings.use_oauth, settings.val1, settings.novld)
+        created = convert_paths(xml_paths, out_dir, url, settings.bearer_token, settings.timeout, settings.sleep_between)
+
+        if merge:
+            merged = out_dir / "all_in_one.pdf"
+            ok, msg = merge_pdfs(created, merged)
+            if not ok:
+                raise HTTPException(500, f"merge failed: {msg}")
+            return StreamingResponse(open(merged, "rb"), media_type="application/pdf",
+                                     headers={"Content-Disposition": 'attachment; filename="all_in_one.pdf"'})
+        return JSONResponse({"generated": [p.name for p in created]})
